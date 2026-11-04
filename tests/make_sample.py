@@ -1,6 +1,7 @@
 """生成一本小样书，用来做端到端回归测试（不依赖外部 PDF）。"""
 from __future__ import annotations
 
+import os
 import sys
 
 import fitz
@@ -70,4 +71,6 @@ def make(path: str) -> None:
 
 
 if __name__ == "__main__":
-    make(sys.argv[1] if len(sys.argv) > 1 else "testdata/合成样书.pdf")
+    target = sys.argv[1] if len(sys.argv) > 1 else "testdata/合成样书.pdf"
+    os.makedirs(os.path.dirname(os.path.abspath(target)), exist_ok=True)
+    make(target)
