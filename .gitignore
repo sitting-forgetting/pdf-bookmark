@@ -24,3 +24,6 @@ venv/
 # 编辑器
 .vscode/
 .idea/
+
+# 生成的 macOS 应用（用 tools/make_app.sh 现场生成，不提交）
+*.app/
