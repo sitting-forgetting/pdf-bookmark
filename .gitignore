@@ -1,0 +1,26 @@
+# 运行产物（生成的 PDF 可能几十上百 MB，不进仓库）
+out/
+bookmark_out/
+编目输出/
+
+# 测试用的真实书籍（版权原因 + 体积太大，不入库）
+testdata/
+tests/*.pdf
+
+# 编译出来的 OCR 小工具（在 README 里有编译命令，按平台自己编）
+bin/visionocr
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# macOS
+.DS_Store
+._*
+
+# 编辑器
+.vscode/
+.idea/
