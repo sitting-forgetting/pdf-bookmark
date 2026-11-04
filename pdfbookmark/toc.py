@@ -36,7 +36,11 @@ _LOOSE_PATTERNS: list[tuple[re.Pattern, int]] = [
     (re.compile(r"^第.{1,4}[章编卷篇部辑]\s"), 1),
     (re.compile(r"^第.{1,4}节\s"), 2),
 ]
-_MAJOR_WORDS = re.compile(r"^(绪论|导论|引言|前言|序言|序|结语|结论|余论|附录|参考文献|后记|跋|致谢|索引|凡例|出版说明)")
+_MAJOR_WORDS = re.compile(
+    r"^(绪论|緒論|导论|導論|引言|前言|序言|序|结语|結語|结论|結論|余论|餘論|"
+    r"附录|附錄|参考文献|參考文獻|后记|後記|跋|致谢|致謝|索引|凡例|出版说明|出版說明|"
+    r"导言|導言|引言|编后记|編後記)"
+)
 
 _ROMAN = {"i": 1, "v": 5, "x": 10, "l": 50, "c": 100, "d": 500, "m": 1000}
 
@@ -57,7 +61,7 @@ def clean_title(t: str) -> str:
     t = t.replace("\u3000", " ")
     t = re.sub(r"[ \t]+", " ", t).strip()
     t = t.strip(_LEADERS + " ")
-    t = re.sub(r"[" + _LEADER_CLS + r"。，、；：]+\s*$", "", t).strip()
+    t = re.sub(r"[" + _LEADER_CLS + r"。，、；：］】」』〔【]+\s*$", "", t).strip()
     t = re.sub(r"\s+", " ", t)
     return t
 

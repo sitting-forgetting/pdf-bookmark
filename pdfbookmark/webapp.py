@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import threading
@@ -153,6 +154,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._api_analyze()
             if parsed.path == "/api/build":
                 return self._api_build()
+            if parsed.path == "/api/reveal":
+                return self._api_reveal()
             self.send_error(404)
         except Exception as e:                     # 兜底，别让服务挂掉
             import traceback
@@ -271,6 +274,40 @@ class Handler(BaseHTTPRequestHandler):
             "count": len(clean),
             "out_path": out_pdf,
         })
+
+    def _api_reveal(self):
+        """在访达里定位生成好的 PDF。浏览器自动下载常被拦，这是更可靠的找回方式。"""
+        body = self._read_body()
+        try:
+            payload = json.loads(body.decode("utf-8") or "{}")
+        except json.JSONDecodeError:
+            return _json(self, {"ok": False, "error": "请求体不是合法 JSON"})
+        job_id = payload.get("id", "")
+        with _LOCK:
+            job = _JOBS.get(job_id)
+        path = job.get("out_pdf") if job else None
+        if not path or not os.path.exists(path):
+            return _json(self, {"ok": False, "error": "这个任务还没有生成文件，或文件已被移走"})
+
+        # 只允许揭示输出目录里的文件，避免被当成任意路径打开器
+        out_root = os.path.abspath(OUT_DIR)
+        target = os.path.abspath(path)
+        try:
+            if os.path.commonpath([target, out_root]) != out_root:
+                return _json(self, {"ok": False, "error": "路径不在输出目录内"})
+        except ValueError:
+            return _json(self, {"ok": False, "error": "路径不合法"})
+
+        try:
+            if sys.platform == "darwin":
+                subprocess.Popen(["open", "-R", target])
+            elif sys.platform.startswith("win"):
+                subprocess.Popen(["explorer", "/select,", target])
+            else:
+                subprocess.Popen(["xdg-open", os.path.dirname(target)])
+        except OSError as e:
+            return _json(self, {"ok": False, "error": f"打开访达失败：{e}"})
+        return _json(self, {"ok": True, "path": target})
 
 
 # ---------------------------------------------------------------- 启动

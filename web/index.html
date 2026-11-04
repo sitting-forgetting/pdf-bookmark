@@ -536,6 +536,15 @@
     color: var(--warn);
   }
 
+  .alert-path {
+    flex-basis: 100%;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11px;
+    line-height: 1.6;
+    opacity: .72;
+    word-break: break-all;
+  }
+
   .alert a {
     color: inherit;
     font-weight: 500;
@@ -1072,6 +1081,7 @@
     ping: "/api/ping",
     analyze: "/api/analyze",
     build: "/api/build",
+    reveal: "/api/reveal",
     download: function (jobId) {
       return "/api/download?id=" + encodeURIComponent(jobId);
     }
@@ -1921,19 +1931,57 @@
     card.buildAlertSlot.replaceChildren(alertBox);
   }
 
-  function showBuildSuccess(card, downloadUrl, outName, count) {
+  function showBuildSuccess(card, downloadUrl, outName, count, outPath) {
     var alertBox = el("div", "alert alert-ok");
     alertBox.appendChild(el(
       "span",
       "alert-text",
       "已生成「" + outName + "」，共 " + count + " 条书签。"
     ));
+
+    var actions = el("div", "alert-actions");
+
+    // 浏览器自动下载可能被拦，给一个必然能找到文件的入口
+    var reveal = el("button", "btn btn-small", "在访达中显示");
+    reveal.type = "button";
+    reveal.addEventListener("click", function () { revealOutput(card, reveal); });
+    actions.appendChild(reveal);
+
     var link = el("a", "", "重新下载");
     link.href = downloadUrl;
     link.download = outName;
     link.rel = "noopener";
-    alertBox.appendChild(link);
+    actions.appendChild(link);
+
+    alertBox.appendChild(actions);
+
+    if (outPath) {
+      alertBox.appendChild(el("div", "alert-path", outPath));
+    }
     card.buildAlertSlot.replaceChildren(alertBox);
+  }
+
+  async function revealOutput(card, btn) {
+    if (!card.job || !card.job.id) return;
+    var label = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "正在打开…";
+    try {
+      var data = await fetchJson(API.reveal, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: card.job.id })
+      });
+      assertOk(data, "打开访达失败");
+      btn.textContent = "已在访达中显示";
+      showToast("已在访达中定位到生成的文件。", "ok");
+    } catch (err) {
+      btn.textContent = label;
+      showToast(err && err.message ? err.message : "打开失败", "error");
+    } finally {
+      btn.disabled = false;
+      window.setTimeout(function () { btn.textContent = label; }, 4000);
+    }
   }
 
   function triggerDownload(url, filename) {
@@ -2007,8 +2055,9 @@
       var rawCount = Number(data.count);
       var count = Number.isInteger(rawCount) && rawCount >= 0 ? rawCount : items.length;
 
+      var outPath = typeof data.out_path === "string" ? data.out_path : "";
       setStatus(card, "done");
-      showBuildSuccess(card, downloadUrl, outName, count);
+      showBuildSuccess(card, downloadUrl, outName, count, outPath);
       setBuildHint(card, "已生成，可修改目录后重新生成。", false);
       triggerDownload(downloadUrl, outName);
       showToast("已生成书签 PDF，开始下载。", "ok");
