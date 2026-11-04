@@ -101,6 +101,8 @@ def analyze(path: str, workers: int = 6, force: bool = False,
         items = build.assemble(entries, pmap, doc.page_count)
         if not items:
             raise BookError("目录条目没能对上任何 PDF 页码")
+        if use_text:
+            items = build.refine_text_pages(doc, items, front_end=region.pages[0])
         scan_seconds = time.time() - t2
 
         checks = build.spot_check(doc, items, use_text)

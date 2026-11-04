@@ -20,6 +20,10 @@ from .ocr import Line, ocr_image, ocr_page, render_png
 
 _LEADERS = "·•∙・‧⋯…‥.．-—_~‑–"
 _LEADER_CLS = re.escape(_LEADERS)
+# 书名末尾用斜杠接页码也很常见：「前言／１」「一、何谓比较文学？／１」
+_SEPARATORS = "／/｜|：:"
+_SEP_CLS = re.escape(_SEPARATORS)
+_TAIL_SEP = "[" + _LEADER_CLS + _SEP_CLS + r"\s]"
 _NUM_ONLY = re.compile(r"^[\s" + _LEADER_CLS + r"]*(\d{1,4})[\s" + _LEADER_CLS + r"]*$")
 _ROMAN_ONLY = re.compile(r"^[\s" + _LEADER_CLS + r"]*([ivxlcdm]{1,7})[\s" + _LEADER_CLS + r"]*$", re.I)
 _HEAD_RE = re.compile(r"^(目\s*[次录]|contents|tableofcontents)$", re.I)
@@ -61,7 +65,7 @@ def clean_title(t: str) -> str:
     t = t.replace("\u3000", " ")
     t = re.sub(r"[ \t]+", " ", t).strip()
     t = t.strip(_LEADERS + " ")
-    t = re.sub(r"[" + _LEADER_CLS + r"。，、；：］】」』〔【]+\s*$", "", t).strip()
+    t = re.sub(r"[" + _LEADER_CLS + _SEP_CLS + r"。，、；：］】」』〔【]+\s*$", "", t).strip()
     t = re.sub(r"\s+", " ", t)
     return t
 
@@ -175,8 +179,12 @@ def toc_page_lines(doc: fitz.Document, index: int, use_text: bool,
     if use_text:
         lines = text_lines(doc, index)
         if lines:
-            inline = [l for l in lines if _NUM_ONLY.match(l.text.strip()) and l.x > 0.40]
-            if len(inline) >= 6:
+            inline = [
+                l for l in lines
+                if _NUM_ONLY.match(l.text.strip())
+                or re.search(_TAIL_SEP + r"{1,}\d{1,4}[\s" + _LEADER_CLS + r"]*$", l.text)
+            ]
+            if len(inline) >= max(3, len(lines) // 3):
                 return lines, None
             # 有些 PDF 是"扫描后补过文字层"：标题在文字层里，页码还是图，
             # 这时右栏要补一遍 OCR
@@ -233,10 +241,10 @@ def row_number(row: list[Line]) -> tuple[int | None, Line | None]:
             return roman_to_int(m.group(1)), l
     if row:
         joined = " ".join(l.text for l in row)
-        m = re.search(r"[\s" + _LEADER_CLS + r"]{1,}(\d{1,4})[\s" + _LEADER_CLS + r"]*$", joined)
+        m = re.search(_TAIL_SEP + r"{1,}(\d{1,4})[\s" + _LEADER_CLS + r"]*$", joined)
         if m:
             return int(m.group(1)), None
-        m = re.search(r"[\s" + _LEADER_CLS + r"]{1,}([ivxlcdm]{1,7})\s*$", joined, re.I)
+        m = re.search(_TAIL_SEP + r"{1,}([ivxlcdm]{1,7})\s*$", joined, re.I)
         if m:
             return -roman_to_int(m.group(1)), None   # 负数标记：前置页罗马数字
     return None, None
@@ -269,7 +277,7 @@ def toc_score(lines: list[Line], nums: list[tuple[float, int, float]] | None = N
     body = [l for l in lines if 0.02 < l.cy < 0.94]
     rows = group_rows(body)
     rows = [r for r in rows if 0.02 < _median([l.cy for l in r]) < 0.94]
-    if len(rows) < 4:
+    if len(rows) < 3:
         return 0.0
     if nums is None:
         hits = sum(1 for r in rows if row_number(r)[0] is not None)
@@ -377,6 +385,7 @@ class Entry:
     conf: float = 1.0
     page: int | None = None
     note: str = ""
+    indent_level: int = 1
 
     def as_dict(self) -> dict:
         return {"level": self.level, "title": self.title, "printed": self.printed,
@@ -425,7 +434,7 @@ def parse_toc_page(title_lines: list[Line], num_lines: list[Line] | None,
         parts = [l.text for l in row if l is not num_line]
         text = "".join(parts)
         if num is not None and num_line is None:
-            text = re.sub(r"[\s" + _LEADER_CLS + r"]*\d{1,4}[\s" + _LEADER_CLS + r"]*$", "", text)
+            text = re.sub("[" + _LEADER_CLS + _SEP_CLS + r"\s]*\d{1,4}[\s" + _LEADER_CLS + r"]*$", "", text)
         title = clean_title(text)
         if not title:
             continue
@@ -450,6 +459,7 @@ def merge_wrapped(entries: list[Entry]) -> list[Entry]:
     i = 0
     while i < len(entries):
         e = entries[i]
+        # 只合并"没有编号的短碎片"，否则会把上一级标题和它的子条目误并成一条
         if e.printed is None and e.pattern is None and i + 1 < len(entries):
             nxt = entries[i + 1]
             gap = nxt.y - e.y
@@ -498,23 +508,26 @@ def assign_levels(entries: list[Entry]) -> list[Entry]:
     present = sorted({e.pattern for e in merged if e.pattern})
     mapping = {p: i + 1 for i, p in enumerate(present)}
 
-    prev_level = 0
-    prev_x0 = None
+    # 缩进用栈来判断"回到上一层"，否则从节回到章的位置时会一直沿用上一层级
+    stack: list[float] = []
     for e in merged:
-        if e.pattern is not None:
+        while len(stack) > 1 and e.x0 < stack[-1] - 0.012:
+            stack.pop()
+        if not stack or e.x0 > stack[-1] + 0.012:
+            stack.append(e.x0)
+        e.indent_level = len(stack)
+
+    prev_level = 0
+    for e in merged:
+        if e.pattern is not None and e.pattern in mapping:
             lvl = mapping[e.pattern]
-        elif prev_x0 is not None and e.x0 > prev_x0 + 0.018:
-            lvl = prev_level + 1
-        elif prev_level:
-            lvl = prev_level
         else:
-            lvl = 1
+            lvl = getattr(e, "indent_level", 1)
         if prev_level and lvl > prev_level + 1:
             lvl = prev_level + 1
         e.level = max(1, lvl)
         e.title = re.sub(r"[\s" + _LEADER_CLS + r"]+$", "", e.title).strip()
         prev_level = e.level
-        prev_x0 = e.x0
     return merged
 
 

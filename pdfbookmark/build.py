@@ -84,6 +84,44 @@ def load_items(path: str) -> list[dict]:
     return data["items"] if isinstance(data, dict) else data
 
 
+def refine_text_pages(doc: "fitz.Document", items: list[dict],
+                      front_end: int | None = None) -> list[dict]:
+    """文字版补救：章级条目在目标页找不到标题时，去"目录之前的前置页"里找。
+
+    典型场景是「前言」「序」这类前置页——它们用另一套页码，只看正文偏移会指错。
+    只在目录页之前找，避免被正文里偶然提到的标题带偏。
+    """
+    if not front_end:
+        return items
+    for it in items:
+        if it["level"] != 1:
+            continue
+        idx = int(it["page"]) - 1
+        if not (0 <= idx < doc.page_count):
+            continue
+        want = _norm(it["title"])
+        if len(want) < 2:
+            continue
+        try:
+            if want in _norm(doc[idx].get_text("text")):
+                continue
+        except Exception:
+            continue
+        for p in range(0, min(front_end, doc.page_count)):
+            try:
+                if want in _norm(doc[p].get_text("text")):
+                    it["page"] = p + 1
+                    it["note"] = "前置页"
+                    break
+            except Exception:
+                continue
+    last = 0
+    for it in items:
+        it["page"] = max(int(it["page"]), last)
+        last = it["page"]
+    return items
+
+
 def spot_check(doc: fitz.Document, items: list[dict], use_text: bool,
                limit: int = 8) -> list[dict]:
     """抽查：把每章起始页的页眉 OCR 出来，和目录标题比对。"""

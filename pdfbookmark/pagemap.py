@@ -63,6 +63,66 @@ class Segment:
         return len(self.anchors)
 
 
+
+def text_page_number(page: "fitz.Page") -> tuple[int | None, str, float, float]:
+    """从文字层读页码。
+
+    坑：PDF 常把「159」拆成三个独立的单字符文本框，逐行匹配只会读到其中一位；
+    必须先把同一行的数字碎片按 x 拼回去。另外页眉里的「５　参考书目」是章号，
+    不是页码，所以只认纯数字片段。
+    """
+    w, h = page.rect.width, page.rect.height
+    frags: list[tuple[float, float, float, str]] = []
+    try:
+        data = page.get_text("dict")
+    except Exception:
+        return None, "", 0.0, -1.0
+    for block in data.get("blocks", []):
+        if block.get("type") != 0:
+            continue
+        for line in block.get("lines", []):
+            txt = "".join(s.get("text", "") for s in line.get("spans", []))
+            if not txt.strip():
+                continue
+            x0, y0, x1, y1 = line["bbox"]
+            cy = (y0 + y1) / 2 / h
+            if 0.22 < cy < 0.86:          # 只要页眉页脚区
+                continue
+            frags.append((x0 / w, x1 / w, cy, txt.strip()))
+    if not frags:
+        return None, "", 0.0, -1.0
+
+    frags.sort(key=lambda f: (round(f[2], 3), f[0]))
+    rows: list[list[tuple[float, float, float, str]]] = []
+    cur = [frags[0]]
+    for f in frags[1:]:
+        if abs(f[2] - cur[-1][2]) < 0.008:
+            cur.append(f)
+        else:
+            rows.append(cur)
+            cur = [f]
+    rows.append(cur)
+
+    for row in rows:
+        row.sort(key=lambda f: f[0])
+        i = len(row) - 1
+        while i >= 0:
+            if row[i][3].isdigit():
+                j = i
+                while (j - 1 >= 0 and row[j - 1][3].isdigit()
+                       and row[j][0] - row[j - 1][1] < 0.06):
+                    j -= 1
+                digits = "".join(f[3] for f in row[j:i + 1])
+                try:
+                    num = int(digits)
+                except ValueError:
+                    break
+                if 0 < num <= 4000:
+                    return num, digits, 1.0, row[j][0]
+            i -= 1
+    return None, "", 0.0, -1.0
+
+
 def _pick_number(lines: list[tuple[str, float, float]]) -> PageNum_fields:
     """从页脚条带的 OCR 行里挑出页码。"""
     best = None
@@ -143,32 +203,14 @@ def _scan_numbers_uncached(path: str, doc: fitz.Document, use_text: bool,
 
     if use_text:
         for i in range(n):
-            page = doc[i]
-            h = page.rect.height
-            try:
-                data = page.get_text("dict")
-            except Exception:
-                continue
-            lines: list[tuple[str, float, float]] = []
-            for block in data.get("blocks", []):
-                if block.get("type") != 0:
-                    continue
-                for line in block.get("lines", []):
-                    txt = "".join(s.get("text", "") for s in line.get("spans", []))
-                    if not txt.strip():
-                        continue
-                    x0, y0, x1, y1 = line["bbox"]
-                    if y0 < h * 0.86 and y1 > h * 0.14:
-                        continue
-                    lines.append((txt, x0 / page.rect.width, 1.0))
-            f = _pick_number(lines)
-            nums[i] = PageNum(i, f.num, f.raw, f.conf, f.x)
+            num, raw, conf, x = text_page_number(doc[i])
+            nums[i] = PageNum(i, num, raw, conf, x)
         if sum(1 for p in nums if p.num is not None) >= n * 0.3:
             return nums
 
     # OCR 路线：页脚 → 命中率不够再试页眉
     indices = list(range(n))
-    for y0, y1 in ((0.86, 1.0), (0.0, 0.14)):
+    for y0, y1 in ((0.86, 1.0), (0.0, 0.22)):
         raw = scan_region(path, indices, y0, y1, dpi=300, level="accurate",
                           workers=workers, progress=progress)
         cand = []
