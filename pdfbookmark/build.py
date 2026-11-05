@@ -125,18 +125,51 @@ def refine_text_pages(doc: "fitz.Document", items: list[dict],
 def spot_check(doc: fitz.Document, items: list[dict], use_text: bool,
                limit: int = 8) -> list[dict]:
     """抽查：把每章起始页的页眉 OCR 出来，和目录标题比对。"""
-    chapters = [it for it in items if it["level"] == 1]
-    if len(chapters) > limit:
-        step = max(1, len(chapters) // limit)
-        chapters = chapters[::step][:limit]
+    # 抽一半一级、一半二级：一级若是分类扉页（竖排/纯图）还能靠二级验证对齐
+    def spread(seq, k):
+        if k <= 0 or not seq:
+            return []
+        step = max(1, len(seq) // k)
+        return seq[::step][:k]
+
+    top = [it for it in items if it["level"] == 1]
+    second = [it for it in items if it["level"] == 2]
+    if len(top) >= 3 and second:
+        chapters = spread(top, max(2, limit // 2)) + spread(second, max(2, limit - limit // 2))
+    elif len(top) >= 3:
+        chapters = spread(top, limit)
+    else:
+        chapters = spread(items, limit)
+    chapters.sort(key=lambda it: it["page"])
+
     out = []
     for it in chapters:
         p = int(it["page"]) - 1
         if not (0 <= p < doc.page_count):
             continue
-        lines = ocr_page(doc, p, dpi=200, clip_norm=(0, 0, 1, 0.35))
-        rows = group_rows(lines)          # 同一行的碎片按 x 排好再拼，避免"第二章/秦汉造船"倒序
-        got = _norm("".join("".join(l.text for l in r) for r in rows))
+        if use_text:
+            # 有文字层就别 OCR，直接读，又快又准
+            page = doc[p]
+            w, h = page.rect.width, page.rect.height
+            try:
+                # 二级标题常在页面中部，只取顶部会漏，直接读整页文字
+                raw = page.get_text("text")
+            except Exception:
+                raw = ""
+            got = _norm(raw)
+        else:
+            # 章标题在页首，节标题常在页面中部，所以二级以下要看整页
+            clip = (0, 0, 1, 1.0) if it["level"] >= 2 else (0, 0, 1, 0.35)
+            lines = ocr_page(doc, p, dpi=200, clip_norm=clip)
+            rows = group_rows(lines)      # 同一行的碎片按 x 排好再拼，避免"第二章/秦汉造船"倒序
+            got = _norm("".join("".join(l.text for l in r) for r in rows))
+        if len(got) < 2:
+            # 扉页/纯图页/竖排标题页：没有可比对的横排文字，如实标"无法比对"而不是判失败
+            out.append({
+                "title": it["title"], "page": it["page"], "coverage": 0.0,
+                "ok": True, "skipped": True, "page_head": "",
+            })
+            continue
         want = _norm(it["title"])
         ratio = difflib.SequenceMatcher(None, want, got).find_longest_match(
             0, len(want), 0, len(got)).size if want else 0
@@ -146,7 +179,7 @@ def spot_check(doc: fitz.Document, items: list[dict], use_text: bool,
             "page": it["page"],
             "coverage": round(coverage, 2),
             "ok": coverage >= (0.5 if len(want) <= 6 else 0.6),
-            "page_head": "".join(l.text for l in lines)[:60],
+            "page_head": got[:60],
         })
     return out
 
@@ -154,7 +187,8 @@ def spot_check(doc: fitz.Document, items: list[dict], use_text: bool,
 def report(items: list[dict], checks: list[dict], pmap_desc: str,
            toc_pages: list[int], profile_line: str) -> str:
     n_levels = max((it["level"] for it in items), default=0)
-    ok = sum(1 for c in checks if c["ok"])
+    judged = [c for c in checks if not c.get("skipped")]
+    ok = sum(1 for c in judged if c["ok"])
     lines = [
         "# 编目报告",
         "",
@@ -170,9 +204,12 @@ def report(items: list[dict], checks: list[dict], pmap_desc: str,
         "| --- | --- | --- | --- |",
     ]
     for c in checks:
-        lines.append(f"| {c['title'][:28]} | {c['page']} | {c['coverage']:.0%} | "
-                     f"{'✅' if c['ok'] else '⚠️'} |")
-    if checks:
+        if c.get("skipped"):
+            lines.append(f"| {c['title'][:28]} | {c['page']} | — | 图文页，跳过 |")
+        else:
+            lines.append(f"| {c['title'][:28]} | {c['page']} | {c['coverage']:.0%} | "
+                         f"{'✅' if c['ok'] else '⚠️'} |")
+    if judged:
         lines.append("")
-        lines.append(f"抽查 {len(checks)} 章，{ok} 章对齐正确。")
+        lines.append(f"抽查 {len(judged)} 章，{ok} 章对齐正确。")
     return "\n".join(lines)

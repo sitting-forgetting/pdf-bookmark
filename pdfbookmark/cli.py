@@ -84,8 +84,14 @@ def cmd_run(path: str, out_dir: str | None = None, workers: int = 6,
         doc2.close()
     print(f"  书签回读：{got} 条")
 
-    ok = sum(1 for c in an.checks if c["ok"])
-    print(f"[4/4] 抽查 {len(an.checks)} 章，{ok} 章标题对齐正确")
+    judged = [c for c in an.checks if not c.get("skipped")]
+    skipped = len(an.checks) - len(judged)
+    ok = sum(1 for c in judged if c["ok"])
+    if judged:
+        extra = f"（另有 {skipped} 个目标页是图文页，无法比对）" if skipped else ""
+        print(f"[4/4] 抽查 {len(judged)} 章，{ok} 章标题对齐正确{extra}")
+    else:
+        print(f"[4/4] 抽查：{skipped} 个目标页都是图文页/竖排标题，无法自动比对")
     print(f"  成品：{paths['pdf']}")
     print(f"  目录：{paths['json']}")
     print(f"  报告：{paths['report']}")

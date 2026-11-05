@@ -50,7 +50,8 @@ class Analysis:
         return Path(self.path).stem
 
     def summary(self) -> dict:
-        ok = sum(1 for c in self.checks if c["ok"])
+        judged = [c for c in self.checks if not c.get("skipped")]
+        ok = sum(1 for c in judged if c["ok"])
         return {
             "pages": self.pages,
             "kind": self.kind,
@@ -60,7 +61,7 @@ class Analysis:
             "items": len(self.items),
             "levels": max((it["level"] for it in self.items), default=0),
             "check_ok": ok,
-            "check_total": len(self.checks),
+            "check_total": len(judged),
             "elapsed": round(self.elapsed, 1),
         }
 

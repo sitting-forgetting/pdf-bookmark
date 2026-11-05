@@ -20,6 +20,9 @@ from .ocr import scan_region
 _CJK = re.compile(r"[\u4e00-\u9fff]")
 _CIRCLED = {chr(0x2460 + i): str(i + 1) for i in range(20)}   # ①..⑳
 _NUM = re.compile(r"^[^\d]{0,3}(\d{1,4})[^\d]{0,3}$")
+# 页眉里页码常和书名/篇名挤在同一行：「12 王国维卷」「王国维卷 12」
+_LEAD_NUM = re.compile(r"^[^\d]{0,3}(\d{1,4})[\s｜|·•:：]+")
+_TAIL_NUM = re.compile(r"[^\d][\s｜|·•:：]+(\d{1,4})[\s｜|·•:：]*$")
 
 
 @dataclass
@@ -123,23 +126,46 @@ def text_page_number(page: "fitz.Page") -> tuple[int | None, str, float, float]:
     return None, "", 0.0, -1.0
 
 
-def _pick_number(lines: list[tuple[str, float, float]]) -> PageNum_fields:
-    """从页脚条带的 OCR 行里挑出页码。"""
+def _pick_number(lines: list[tuple[str, float, float, float]]) -> PageNum_fields:
+    """从页眉/页脚条带的 OCR 行里挑出页码。
+
+    三种形态，规则各不相同，混淆了就会把正文/脚注里的数字当成页码：
+      ① 整行就是页码：「•38•」「•⑨」
+      ② 页眉左边是数字：「12 王国维卷」
+      ③ 页眉右边是数字：「导言 13」
+    """
     best = None
-    for text, x, conf in lines:
-        t = text.strip().translate(str.maketrans(_CIRCLED))
-        if not t or len(t) > 10 or _CJK.search(t):
+    for item in lines:
+        text, x, w, conf = item
+        t = text.strip()
+        if not t:
             continue
-        m = _NUM.match(t)
-        if not m:
+        right = x + w
+        num = None
+
+        # ① 整行纯页码（允许圈码、点线、竖线这些装饰），行内不能有汉字
+        pure = t.translate(str.maketrans(_CIRCLED))
+        if not _CJK.search(pure):
+            m = _NUM.match(pure)
+            if m:
+                num = int(m.group(1))
+
+        if num is None:
+            m = _LEAD_NUM.match(t)          # ② 「12 王国维卷」
+            if m and x < 0.30:
+                num = int(m.group(1))
+            else:
+                m = _TAIL_NUM.search(t)     # ③ 「导言 13」
+                if m and right > 0.62:
+                    num = int(m.group(1))
+
+        if num is None or not (0 < num <= 4000):
             continue
-        num = int(m.group(1))
-        if num > 4000:
-            continue
-        edge = 1.0 if (x < 0.28 or x > 0.70) else 0.0
+
+        edge = 1.0 if (x < 0.28 or right > 0.70) else 0.0
         score = conf + edge * 0.5
         if best is None or score > best[0]:
-            best = (score, num, text, conf, x)
+            best = (score, num, t, conf, x)
     if best is None:
         return PageNum_fields(None, "", 0.0, -1.0)
     return PageNum_fields(best[1], best[2], best[3], best[4])
@@ -154,11 +180,15 @@ class PageNum_fields:
 
 
 _CACHE_DIR = os.path.join(tempfile.gettempdir(), "pdfbookmark_cache")
+# 改了页码识别规则就加一，免得命中旧规则算出来的缓存
+_CACHE_VERSION = 3
 
 
 def _cache_path(path: str) -> str:
     st = os.stat(path)
-    key = hashlib.sha1(f"{os.path.abspath(path)}|{st.st_mtime_ns}|{st.st_size}".encode()).hexdigest()[:16]
+    key = hashlib.sha1(
+        f"{os.path.abspath(path)}|{st.st_mtime_ns}|{st.st_size}|v{_CACHE_VERSION}".encode()
+    ).hexdigest()[:16]
     return os.path.join(_CACHE_DIR, key + ".json")
 
 
@@ -175,7 +205,9 @@ def _save_cache(path: str, nums: list[PageNum]) -> None:
     try:
         os.makedirs(_CACHE_DIR, exist_ok=True)
         st = os.stat(path)
-        key = hashlib.sha1(f"{os.path.abspath(path)}|{st.st_mtime_ns}|{st.st_size}".encode()).hexdigest()[:16]
+        key = hashlib.sha1(
+            f"{os.path.abspath(path)}|{st.st_mtime_ns}|{st.st_size}|v{_CACHE_VERSION}".encode()
+        ).hexdigest()[:16]
         with open(os.path.join(_CACHE_DIR, key + ".json"), "w", encoding="utf-8") as f:
             json.dump([{"index": p.index, "num": p.num, "raw": p.raw, "conf": p.conf, "x": p.x} for p in nums], f)
     except OSError:
@@ -208,9 +240,18 @@ def _scan_numbers_uncached(path: str, doc: fitz.Document, use_text: bool,
         if sum(1 for p in nums if p.num is not None) >= n * 0.3:
             return nums
 
-    # OCR 路线：页脚 → 命中率不够再试页眉
+    # OCR 路线：先用少量页面探一下页码到底在页脚还是页眉，别把两边都全扫一遍
     indices = list(range(n))
-    for y0, y1 in ((0.86, 1.0), (0.0, 0.22)):
+    probe = sorted(set(indices[:6] + indices[n // 2: n // 2 + 6] + indices[-6:]))
+    bands = [(0.86, 1.0), (0.0, 0.22)]
+    for y0, y1 in bands:
+        raw = scan_region(path, probe, y0, y1, dpi=300, level="accurate", workers=workers)
+        hits = sum(1 for i in probe if _pick_number(raw.get(i, [])).num is not None)
+        if hits >= max(2, len(probe) // 3):
+            bands = [(y0, y1)]
+            break
+
+    for y0, y1 in bands:
         raw = scan_region(path, indices, y0, y1, dpi=300, level="accurate",
                           workers=workers, progress=progress)
         cand = []

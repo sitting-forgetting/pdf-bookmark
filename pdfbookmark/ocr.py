@@ -173,7 +173,7 @@ def ocr_page(doc: fitz.Document, index: int, dpi: float = 300,
 
 # ---------------------------------------------------------------- 并行扫描
 
-def _scan_chunk(job: tuple[str, list[int], float, float, float, str]) -> list[tuple[int, list[tuple[str, float, float]]]]:
+def _scan_chunk(job: tuple[str, list[int], float, float, float, str]) -> list[tuple[int, list[tuple[str, float, float, float]]]]:
     pdf, indices, y0, y1, dpi, level = job
     doc = fitz.open(pdf)
     out = []
@@ -186,7 +186,7 @@ def _scan_chunk(job: tuple[str, list[int], float, float, float, str]) -> list[tu
             path = os.path.join(tmpdir, f"{i}.png")
             pix.save(path)
             lines = ocr_image(path, level=level)
-            out.append((i, [(l.text, l.x, l.conf) for l in lines]))
+            out.append((i, [(l.text, l.x, l.w, l.conf) for l in lines]))
             os.remove(path)
     finally:
         doc.close()
@@ -206,8 +206,11 @@ def scan_region(
     level: str = "accurate",
     workers: int = 6,
     progress=None,
-) -> dict[int, list[tuple[str, float, float]]]:
-    """并行 OCR 每页的某个横向条带（页眉/页脚），返回 {页序号(0-based): [(文本, x, 置信度)]}。"""
+) -> dict[int, list[tuple[str, float, float, float]]]:
+    """并行 OCR 每页的某个横向条带（页眉/页脚）。
+
+    返回 {页序号(0-based): [(文本, x, 宽, 置信度)]}——宽度用来判断页码在行的哪一头。
+    """
     indices = list(indices)
     if not indices:
         return {}
@@ -217,7 +220,7 @@ def scan_region(
     for k in range(0, len(indices), chunk):
         jobs.append((pdf_path, indices[k:k + chunk], y0, y1, dpi, level))
 
-    result: dict[int, list[tuple[str, float, float]]] = {}
+    result: dict[int, list[tuple[str, float, float, float]]] = {}
     done = 0
     if workers == 1:
         for job in jobs:

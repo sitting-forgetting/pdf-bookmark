@@ -386,6 +386,9 @@ class Entry:
     page: int | None = None
     note: str = ""
     indent_level: int = 1
+    cy: float = 0.0
+    row_h: float = 0.0
+    bold: bool | None = None
 
     def as_dict(self) -> dict:
         return {"level": self.level, "title": self.title, "printed": self.printed,
@@ -445,6 +448,8 @@ def parse_toc_page(title_lines: list[Line], num_lines: list[Line] | None,
             printed=num,
             x0=min(l.x for l in row),
             y=min(l.y for l in row),
+            cy=_median([l.cy for l in row]),
+            row_h=_median([l.h for l in row]),
             page_in_toc=page_idx,
             pattern=pattern_level(title),
             conf=min(l.conf for l in row),
@@ -480,20 +485,28 @@ def merge_wrapped(entries: list[Entry]) -> list[Entry]:
     return out
 
 
+def _norm_head(s: str) -> str:
+    """书眉里的页码/竖线要去掉再比：「2 王国维卷」和「4 王国维卷」是同一个书眉。"""
+    return re.sub(r"[\d\s｜|‖·•.．:：]+", "", s)
+
+
 def drop_running_headers(pages: list[list[Entry]]) -> None:
-    """去掉反复出现的书眉（如书名、'目次'）。"""
+    """去掉反复出现的书眉（如书名、'目次'、'2 王国维卷'）。"""
     from collections import Counter
     cnt: Counter[str] = Counter()
     for ents in pages:
         seen = set()
         for e in ents:
-            if e.y < 0.14 and len(e.title) <= 12:
-                seen.add(e.title)
+            if e.y < 0.13:
+                key = _norm_head(e.title)
+                if 1 <= len(key) <= 12:
+                    seen.add(key)
         for s in seen:
             cnt[s] += 1
-    repeat = {s for s, c in cnt.items() if c >= 2 and len(s) <= 12}
+    repeat = {s for s, c in cnt.items() if c >= 2}
     for ents in pages:
-        ents[:] = [e for e in ents if not (e.y < 0.14 and e.title in repeat)]
+        ents[:] = [e for e in ents
+                   if not (e.y < 0.13 and _norm_head(e.title) in repeat)]
 
 
 def assign_levels(entries: list[Entry]) -> list[Entry]:
@@ -531,6 +544,111 @@ def assign_levels(entries: list[Entry]) -> list[Entry]:
     return merged
 
 
+
+def _stroke_thickness(gray) -> float:
+    """量一段文字的笔画粗细：横向连续黑像素长度的均值。
+
+    加粗字体的笔画更粗，均值明显偏大——OCR 拿不到字体信息，只能这样反推。
+    """
+    try:
+        import numpy as np
+        arr = np.asarray(gray, dtype=np.uint8)
+        dark = arr < 128
+        total = int(dark.sum())
+        if total == 0:
+            return 0.0
+        starts = dark.copy()
+        starts[:, 1:] &= ~dark[:, :-1]
+        runs = int(starts.sum())
+        return total / runs if runs else 0.0
+    except ImportError:
+        pass
+
+    px = gray.load()
+    w, h = gray.size
+    runs = []
+    for y in range(h):
+        run = 0
+        for x in range(w):
+            if px[x, y] < 128:
+                run += 1
+            else:
+                if 0 < run <= 12:
+                    runs.append(run)
+                run = 0
+        if 0 < run <= 12:
+            runs.append(run)
+    return sum(runs) / len(runs) if runs else 0.0
+
+
+def mark_bold(doc, region: "TocRegion", entries: list[Entry]) -> None:
+    """给每个条目打上「是不是加粗」的标记，用来识别目录里的分类标题。"""
+    try:
+        from PIL import Image
+    except ImportError:
+        return
+
+    by_page: dict[int, list[Entry]] = {}
+    for e in entries:
+        by_page.setdefault(e.page_in_toc, []).append(e)
+
+    for k, ents in by_page.items():
+        if k >= len(region.pages):
+            continue
+        try:
+            pix = doc[region.pages[k]].get_pixmap(dpi=250)
+            img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples).convert("L")
+        except Exception:
+            continue
+        W, H = img.size
+        measured: list[tuple[Entry, float]] = []
+        for e in ents:
+            if e.row_h <= 0:
+                continue
+            x0 = e.x0
+            x1 = min(x0 + 0.22, max(l for l in [e.x0] ) + 0.22)
+            top = int((e.cy - e.row_h * 0.8) * H)
+            bot = int((e.cy + e.row_h * 0.8) * H)
+            left, right = int(x0 * W), int(x1 * W)
+            if right - left < 12 or bot - top < 6:
+                continue
+            crop = img.crop((left, max(0, top), right, min(H, bot)))
+            measured.append((e, _stroke_thickness(crop)))
+        if len(measured) < 3:
+            continue
+        vals = sorted(v for _, v in measured)
+        med = vals[len(vals) // 2]
+        if med <= 0:
+            continue
+        for e, v in measured:
+            e.bold = v > med * 1.22
+
+
+def apply_bold_levels(entries: list[Entry]) -> bool:
+    """整本目录都平铺成一级时，用加粗标题重新分成两级。
+
+    只在"原本没有层级"的情况下动手，避免破坏已经识别正确的层级。
+    """
+    if not entries:
+        return False
+    flat_ratio = sum(1 for e in entries if e.level == 1) / len(entries)
+    if flat_ratio < 0.85:        # 已经有层级了就别动
+        return False
+    bolds = [e for e in entries if e.bold]
+    if len(bolds) < 2 or len(bolds) > len(entries) * 0.5:
+        return False
+    seen_bold = False
+    for e in entries:
+        if e.bold:
+            seen_bold = True
+            e.level = 1
+        elif seen_bold:
+            e.level = 2
+        else:
+            e.level = 1
+    return True
+
+
 def parse_toc(doc: fitz.Document, region: TocRegion, use_text: bool,
               progress=None) -> list[Entry]:
     per_page: list[list[Entry]] = []
@@ -545,4 +663,11 @@ def parse_toc(doc: fitz.Document, region: TocRegion, use_text: bool,
             progress(k + 1, len(region.pages))
     drop_running_headers(per_page)
     flat = [e for ents in per_page for e in ents]
-    return assign_levels(merge_wrapped(flat))
+    result = assign_levels(merge_wrapped(flat))
+    if not use_text:
+        try:
+            mark_bold(doc, region, result)
+            apply_bold_levels(result)
+        except Exception:
+            pass
+    return result
