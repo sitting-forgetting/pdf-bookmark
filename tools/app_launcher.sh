@@ -36,6 +36,25 @@ if [ ! -d "$PROJECT/pdfbookmark" ]; then
   exit 1
 fi
 
+# macOS 会拦住 App 读取「桌面/文稿/下载」这些受保护目录。
+# 先探一下能不能读到项目里的文件，读不到就直接给用户指路，别让他对着没反应的窗口干等。
+if ! /bin/ls "$PROJECT/pdfbookmark" >/dev/null 2>&1; then
+  if [ -z "$PDFBOOKMARK_SILENT" ]; then
+    /usr/bin/osascript <<'APPLESCRIPT' >/dev/null 2>&1
+display dialog "macOS 阻止了「PDF 编目」读取桌面上的文件。
+
+请在「系统设置 → 隐私与安全性 → 完全磁盘访问权限」里勾选 PDF 编目，
+然后重新打开它（只需设置一次）。
+
+点「去设置」会自动打开那个面板。" buttons {"去设置", "取消"} default button 1 with icon caution with title "PDF 编目"
+APPLESCRIPT
+    if [ $? -eq 0 ]; then
+      /usr/bin/open "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
+    fi
+  fi
+  exit 1
+fi
+
 cd "$PROJECT" || exit 1
 
 # ---------------------------------------------------------------- 收集参数
