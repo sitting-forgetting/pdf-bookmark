@@ -11,9 +11,13 @@ if /usr/bin/curl -s --max-time 1 "http://127.0.0.1:$PORT/api/ping" >/dev/null 2>
   exit 0
 fi
 
-# 优先用装了 PyMuPDF 的那个 python
-PY="/Users/zhangzhaoxing/anaconda3/bin/python3"
-[ -x "$PY" ] || PY="$(command -v python3)"
+# 用系统 python + 项目自带 vendor（摆脱对某个固定 Anaconda 路径的依赖）
+PY="$(command -v python3)"
+
+# 依赖没了就自动重装一次（vendor 不入库，换电脑时这里会自己恢复）
+bash tools/ensure_deps.sh || { echo "依赖安装失败，请把终端输出发给维护者"; exit 1; }
+
+export PYTHONPATH="$(pwd)/vendor${PYTHONPATH:+:$PYTHONPATH}"
 
 echo "正在启动 PDF 编目界面…（关掉这个窗口或按 Ctrl-C 即停止）"
 exec "$PY" -m pdfbookmark gui --port "$PORT"

@@ -1,0 +1,3 @@
+PyMuPDF==2.1
+numpy
+pillow

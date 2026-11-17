@@ -11,11 +11,27 @@
    用"物理页 − 印刷页码"的众数找出正文段，自动算出偏移量（本示例书为 +23）。
 3. **写入书签**：按层级写进 PDF 大纲，并回读校验、抽章比对。
 
+## 为什么以前会"突然不能用"，现在怎么保证
+
+ macOS 上的 Python 环境会变（比如删了 Anaconda、系统升级 Python 到 3.14），
+ 以前脚本写死了 `/Users/zhangzhaoxing/anaconda3/bin/python3` 且依赖装在全局，
+ 环境一变就找不到 `fitz`，双击 App 就没反应。
+
+ 现在改成：
+ - 依赖（PyMuPDF / numpy / Pillow）的离线安装包随项目放在 `wheels/`（74 MB，已入库），
+   首次运行或换 Python 后由 `tools/ensure_deps.sh` 自动装到 `vendor/`，不用联网；
+ - 启动脚本自动检查依赖、设置 `PYTHONPATH`，用系统自带的 `python3` 就能跑；
+ - OCR 工具 `bin/visionocr` 是本地编译的 arm64 二进制，不依赖 Python。
+
+ `vendor/` 是生成物、不入库；`wheels/` 和 `bin/visionocr` 入库。
+ 只要这两样还在，项目挪到哪、换了什么 Python 都能自恢复。
+
+
 ## 环境
 
-- macOS（OCR 用系统自带 Vision 框架，中文识别质量好、不用下载模型、不用联网）
-- Python 3.9+，`PyMuPDF`（`import fitz`）
-- 首次使用需编译 OCR 小工具：
+- **macOS 11+**，Apple Silicon（OCR 用系统自带 Vision 框架，中文识别质量好、不用下载模型、不用联网）
+- Python 3.9+（系统自带的就行）——依赖已随项目放在 `vendor/`，不用自己装
+- `bin/visionocr`：首次使用需编译一次（见下）
 
 ```bash
 swiftc -O -o bin/visionocr tools/visionocr.swift -framework Vision -framework AppKit

@@ -27,3 +27,6 @@ venv/
 
 # 生成的 macOS 应用（用 tools/make_app.sh 现场生成，不提交）
 *.app/
+
+# 本地依赖目录：由 python3 -m pip install --target vendor ... 生成，不入库
+vendor/
